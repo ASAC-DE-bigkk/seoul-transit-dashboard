@@ -13,7 +13,7 @@
 |------|------|
 | `index.html` | 자체완결 단일 페이지 (외부 CDN 없음, vanilla JS + inline SVG). |
 | `data/profile.js` | `window.PROFILE` — 동×시간대 지표(주차·버스·지하철) 일자 평균. |
-| `data/boundary.js` | `window.BOUNDARY` — 서울 행정동 경계 GeoJSON(423동). |
+| `data/boundary.js` | `window.BOUNDARY` — 서울 행정동 경계 GeoJSON(420동). |
 | `scripts/export_data.py` | 데이터 재생성 스크립트 (Trino/Iceberg → 위 두 JS 파일). |
 
 `data/*.js` 는 `fetch` 대신 전역 변수(`window.PROFILE`, `window.BOUNDARY`)로 주입되므로
@@ -31,18 +31,26 @@
 
 ## 데이터 출처
 
-- 서울 열린데이터광장 Open API (인증키 발급 활용)
-  - 지하철 실시간 도착 정보
-  - 버스 실시간 위치 정보
-  - 공영주차장 실시간 정보
+- [서울 열린데이터광장](https://data.seoul.go.kr/) Open API (인증키 발급 활용)
+  - 지하철 실시간 도착 정보 (`realtimeStationArrival`, OA-12764)
+  - 버스 실시간 위치 정보 (서울 TOPIS)
+  - 공영주차장 실시간 정보 (`GetParkingInfo`)
 - 원천 → Bronze/Silver/Gold(dbt on Trino/Iceberg) 파이프라인을 거쳐
   `gold_transit_dong_hourly` (동×시간 grain) 로 집계된 값을 사용합니다.
+  - 수집 DAG: [ASAC-DAG](https://github.com/ASAC-DE-bigkk/ASAC-DAG)
+  - 변환(dbt): [ASAC-DBT](https://github.com/ASAC-DE-bigkk/ASAC-DBT)
 - 행정동 경계·명칭: 행정안전부 행정동 마스터 및 경계 seed.
+
+> **정적 스냅샷 안내** — 이 페이지의 `data/*.js` 는 실시간이 아니라 `export_data.py` 를
+> 실행한 시점의 스냅샷입니다. 페이지 상단에 데이터 기간과 마지막 갱신 시각(`generated`)이
+> 표시되며, 갱신은 아래 절차를 다시 실행해야 반영됩니다.
 
 ## 데이터 갱신 방법
 
 `scripts/export_data.py` 가 Trino(Iceberg 카탈로그)에서 조회해 `data/profile.js` 와
 `data/boundary.js` 를 다시 생성합니다. 접속 정보는 환경변수로 전달합니다(시크릿 미포함).
+**전제**: 대상 Trino 에 상류 파이프라인이 적재한 `gold_transit_dong_hourly`·
+`dim_admin_dong`·`seoul_admin_dong_boundary` 가 존재해야 합니다(위 ASAC-DAG/ASAC-DBT 참고).
 
 ```bash
 pip install trino
@@ -82,7 +90,7 @@ python -m http.server 8000
 
 ## 라이선스
 
-이 저장소는 [MIT License](LICENSE) 하에 배포됩니다.
+이 저장소는 [Apache License 2.0](LICENSE) 하에 배포됩니다.
 데이터 출처는 서울 열린데이터광장 Open API 이며, 각 데이터셋의 이용 조건을 따릅니다.
 
 ---

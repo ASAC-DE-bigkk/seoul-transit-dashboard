@@ -37,8 +37,11 @@ container, so it is run there and the results copied out:
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 import trino
+
+KST = timezone(timedelta(hours=9))
 
 
 def connect():
@@ -72,13 +75,11 @@ def build_profile(cur):
             avg(bus_congestion_avg)           as bus,
             avg(subway_wait_avg_s)            as subway,
             avg(parking_occupancy_avg)        as parking,
-            avg(cast(bus_obs_cnt as double))       as bus_ref,
-            avg(cast(subway_arrival_cnt as double))as subway_ref,
-            avg(cast(parking_lot_cnt as double))   as parking_ref,
             count(bus_congestion_avg)         as bus_days,
             count(subway_wait_avg_s)          as subway_days,
             count(parking_occupancy_avg)      as parking_days
         from gold_transit_dong_hourly
+        where admin_dong_code is not null
         group by admin_dong_code, hour(hour_at)
     """)
 
@@ -99,7 +100,6 @@ def build_profile(cur):
 
     dongs = {}
     for (code, h, bus, subway, parking,
-         bus_ref, subway_ref, parking_ref,
          bus_days, subway_days, parking_days) in agg:
         d = dongs.get(code)
         if d is None:
@@ -111,26 +111,24 @@ def build_profile(cur):
                 "m": {"parking": [None] * 24, "bus": [None] * 24, "subway": [None] * 24},
                 # observation-day count backing each average (for tooltips)
                 "obs": {"parking": [0] * 24, "bus": [0] * 24, "subway": [0] * 24},
-                # reference volume averages (bus obs / subway arrivals / parking lots)
-                "ref": {"parking": [None] * 24, "bus": [None] * 24, "subway": [None] * 24},
             }
         h = int(h)
         d["m"]["bus"][h] = r3(bus)
         d["m"]["subway"][h] = r3(subway)
         d["m"]["parking"][h] = r3(parking)
-        d["ref"]["bus"][h] = r3(bus_ref)
-        d["ref"]["subway"][h] = r3(subway_ref)
-        d["ref"]["parking"][h] = r3(parking_ref)
         d["obs"]["bus"][h] = int(bus_days)
         d["obs"]["subway"][h] = int(subway_days)
         d["obs"]["parking"][h] = int(parking_days)
 
     return {
-        "generated": range_end,
+        # generated = 이 export 를 실행한 시각(KST) — 페이지의 '마지막 갱신' 표기용.
+        # (데이터 자체의 기간은 range 가 말한다. generated=range_end 로 두면
+        #  스냅샷이 오래돼도 최신처럼 보이는 오표기가 되므로 분리.)
+        "generated": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "range": [range_start, range_end],
         "days": day_cnt,
-        "hours": list(range(24)),
-        "dongs": dongs,
+        # 재실행 diff 안정성: 동 코드 오름차순으로 직렬화.
+        "dongs": {code: dongs[code] for code in sorted(dongs)},
     }
 
 
@@ -144,6 +142,8 @@ def round_coords(obj, nd=5):
 
 
 def build_boundary(cur):
+    # admin_dong_code null(경계 seed 에 코드 미부착) 행은 지도에서 색을 칠 수도,
+    # 툴팁/선택 키로 쓸 수도 없으므로 제외한다. 코드 정렬은 재실행 diff 안정성용.
     data = rows(cur, """
         select
             admin_dong_code,
@@ -152,6 +152,8 @@ def build_boundary(cur):
             to_geojson_geometry(ST_GeometryFromText(boundary_wkt)) as gj
         from seoul_admin_dong_boundary
         where boundary_wkt is not null
+          and admin_dong_code is not null
+        order by admin_dong_code
     """)
     features = []
     for code, name, gu, gj in data:
