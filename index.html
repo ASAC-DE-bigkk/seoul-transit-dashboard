@@ -1,0 +1,660 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>서울 동네 교통 상태판</title>
+<meta name="description" content="서울 열린데이터광장 실시간 교통 API로 수집한 동×시간대 교통 상태판">
+<style>
+/* ── design tokens (dataviz 계약) ─────────────────────────────────────────
+   시퀀셜 blue 단일 색상. 텍스트는 잉크 토큰만. 라이트 기본 + prefers dark 별도값.
+   [data-theme] 은 수동 토글이 미디어쿼리를 이기게 함. */
+:root{
+  --surface:#fcfcfb; --panel:#ffffff; --ink:#0b0b0b; --ink2:#52514e;
+  --grid:#e1e0d9; --neutral:#f0efec; --axis:#898781; --line-strong:#256abf;
+  --border:#e6e5df; --shadow:0 1px 3px rgba(0,0,0,.08),0 6px 20px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --surface:#1a1a19; --panel:#222220; --ink:#ffffff; --ink2:#c3c2b7;
+    --grid:#2c2c2a; --neutral:#383835; --axis:#898781; --line-strong:#5598e7;
+    --border:#333330; --shadow:0 1px 3px rgba(0,0,0,.4),0 6px 22px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme=light]{
+  --surface:#fcfcfb; --panel:#ffffff; --ink:#0b0b0b; --ink2:#52514e;
+  --grid:#e1e0d9; --neutral:#f0efec; --axis:#898781; --line-strong:#256abf;
+  --border:#e6e5df; --shadow:0 1px 3px rgba(0,0,0,.08),0 6px 20px rgba(0,0,0,.06);
+}
+:root[data-theme=dark]{
+  --surface:#1a1a19; --panel:#222220; --ink:#ffffff; --ink2:#c3c2b7;
+  --grid:#2c2c2a; --neutral:#383835; --axis:#898781; --line-strong:#5598e7;
+  --border:#333330; --shadow:0 1px 3px rgba(0,0,0,.4),0 6px 22px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--surface); color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  line-height:1.5; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:20px 18px 48px}
+header h1{font-size:26px;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--ink2);font-size:14px;margin:0}
+.asof{color:var(--axis);font-size:12.5px;margin:6px 0 0}
+.topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.themebtn{
+  background:var(--panel);color:var(--ink2);border:1px solid var(--border);
+  border-radius:8px;padding:6px 11px;font-size:12.5px;cursor:pointer;font-family:inherit;
+}
+.themebtn:hover{color:var(--ink)}
+
+/* tabs */
+.tabs{display:flex;gap:8px;margin:20px 0 12px;flex-wrap:wrap}
+.tab{
+  background:var(--panel);color:var(--ink2);border:1px solid var(--border);
+  border-radius:10px;padding:9px 15px;font-size:14px;cursor:pointer;font-family:inherit;
+  transition:.12s;
+}
+.tab:hover{color:var(--ink)}
+.tab[aria-selected=true]{
+  background:var(--line-strong);color:#fff;border-color:var(--line-strong);font-weight:600;
+}
+.metricdesc{color:var(--ink2);font-size:13.5px;margin:0 0 10px}
+
+/* coverage notice */
+.coverage{
+  border:1px solid var(--border);border-left:3px solid var(--line-strong);
+  background:var(--panel);border-radius:8px;padding:10px 13px;font-size:13px;
+  color:var(--ink2);margin:0 0 16px;
+}
+.coverage b{color:var(--ink)}
+
+/* slider */
+.sliderrow{display:flex;align-items:center;gap:14px;margin:0 0 14px;flex-wrap:wrap}
+.sliderrow label{font-size:13px;color:var(--ink2);white-space:nowrap}
+.hourval{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink);min-width:56px}
+input[type=range]{flex:1;min-width:200px;accent-color:var(--line-strong);height:22px}
+
+/* layout */
+.grid{display:grid;grid-template-columns:1.55fr 1fr;gap:18px}
+@media (max-width:820px){.grid{grid-template-columns:1fr}}
+.card{
+  background:var(--panel);border:1px solid var(--border);border-radius:12px;
+  padding:14px;box-shadow:var(--shadow);
+}
+.card h2{font-size:14px;margin:0 0 10px;color:var(--ink2);font-weight:600}
+.mapwrap{position:relative}
+svg{display:block;width:100%;height:auto}
+.dong{stroke:var(--surface);stroke-width:.4;cursor:pointer;transition:opacity .1s}
+.dong:hover{opacity:.82}
+.dong.sel{stroke:var(--ink);stroke-width:1.3}
+
+/* legend */
+.legend{margin-top:12px}
+.legendbar{display:flex;height:14px;border-radius:4px;overflow:hidden}
+.legendbar span{flex:1}
+.legendlabels{display:flex;justify-content:space-between;font-size:11px;
+  color:var(--axis);font-variant-numeric:tabular-nums;margin-top:4px}
+.legendnote{font-size:11.5px;color:var(--axis);margin-top:6px;display:flex;align-items:center;gap:6px}
+.swatch-na{width:12px;height:12px;border-radius:3px;background:var(--neutral);
+  border:1px solid var(--border);display:inline-block;vertical-align:-2px}
+
+/* tooltip */
+.tip{
+  position:fixed;pointer-events:none;z-index:20;background:var(--panel);
+  border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12.5px;
+  box-shadow:var(--shadow);color:var(--ink);max-width:230px;opacity:0;transition:opacity .08s;
+}
+.tip .t-name{font-weight:600}
+.tip .t-gu{color:var(--ink2);font-size:11.5px}
+.tip .t-val{margin-top:4px;font-variant-numeric:tabular-nums}
+.tip .t-obs{color:var(--axis);font-size:11px;margin-top:2px}
+
+/* detail panel */
+.detail .placeholder{color:var(--axis);font-size:13px;text-align:center;padding:36px 8px}
+.detail .dname{font-size:16px;font-weight:700;margin:0}
+.detail .dgu{color:var(--ink2);font-size:12.5px;margin:0 0 6px}
+.mini{display:flex;gap:8px;margin:10px 0 6px}
+.mini .m{flex:1;border:1px solid var(--border);border-radius:8px;padding:8px 9px}
+.mini .m .lab{font-size:11px;color:var(--ink2)}
+.mini .m .now{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}
+.mini .m .avg{font-size:11px;color:var(--axis);margin-top:1px}
+.chartcap{font-size:12px;color:var(--ink2);margin:8px 0 2px}
+
+/* table */
+.tabletoggle{margin:20px 0 0}
+.tbtn{background:var(--panel);color:var(--ink2);border:1px solid var(--border);
+  border-radius:8px;padding:7px 13px;font-size:13px;cursor:pointer;font-family:inherit}
+.tbtn:hover{color:var(--ink)}
+.tablewrap{overflow-x:auto;margin-top:12px;border:1px solid var(--border);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+th{color:var(--ink2);font-weight:600;cursor:pointer;position:sticky;top:0;background:var(--panel)}
+th:hover{color:var(--ink)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tbody tr:hover{background:var(--neutral)}
+.hidden{display:none}
+
+footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--border);
+  font-size:12px;color:var(--axis)}
+footer a{color:var(--ink2)}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="topbar">
+      <div>
+        <h1>서울 동네 교통 상태판</h1>
+        <p class="sub">서울 열린데이터광장 실시간 교통 API로 수집한 동×시간대 상태</p>
+        <p class="asof" id="asof"></p>
+      </div>
+      <button class="themebtn" id="themebtn" title="라이트/다크 전환">◐ 테마</button>
+    </div>
+  </header>
+
+  <div class="tabs" role="tablist" id="tabs">
+    <button class="tab" role="tab" data-metric="parking" aria-selected="true">주차 점유율</button>
+    <button class="tab" role="tab" data-metric="bus" aria-selected="false">버스 혼잡도</button>
+    <button class="tab" role="tab" data-metric="subway" aria-selected="false">지하철 대기시간</button>
+  </div>
+  <p class="metricdesc" id="metricdesc"></p>
+  <div class="coverage" id="coverage"></div>
+
+  <div class="sliderrow">
+    <label for="hour">시간대</label>
+    <input type="range" id="hour" min="0" max="23" step="1" value="18">
+    <span class="hourval" id="hourval">18:00</span>
+  </div>
+
+  <div class="grid">
+    <div class="card mapwrap">
+      <h2 id="maptitle"></h2>
+      <div id="mapholder"></div>
+      <div class="legend">
+        <div class="legendbar" id="legendbar"></div>
+        <div class="legendlabels" id="legendlabels"></div>
+        <div class="legendnote"><span class="swatch-na"></span>데이터 없는 동 (해당 시간·지표 관측 없음)</div>
+      </div>
+    </div>
+
+    <div class="card detail" id="detail">
+      <h2>동 상세</h2>
+      <div class="placeholder" id="detailph">지도에서 동을 클릭하면 24시간 추이를 봅니다.</div>
+      <div id="detailbody" class="hidden"></div>
+    </div>
+  </div>
+
+  <div class="tabletoggle">
+    <button class="tbtn" id="tabletoggle" aria-expanded="false">표로 보기 ▾</button>
+    <div class="tablewrap hidden" id="tablewrap">
+      <table id="datatable"><thead></thead><tbody></tbody></table>
+    </div>
+  </div>
+
+  <footer>
+    데이터: 서울 열린데이터광장 Open API — 지하철 실시간 도착 · 버스 실시간 위치 · 공영주차장 실시간 정보
+    (인증키 발급 활용) · ASAC 데이터엔지니어링 팀 ·
+    <a href="https://github.com/ASAC-DE-bigkk/seoul-transit-dashboard" target="_blank" rel="noopener">GitHub 저장소</a>
+  </footer>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script src="data/boundary.js"></script>
+<script src="data/profile.js"></script>
+<script>
+"use strict";
+/* ══════════════════════════════════════════════════════════════════════════
+   서울 동네 교통 상태판 — vanilla JS, 외부 의존성 없음.
+   데이터: window.BOUNDARY(GeoJSON 폴리곤 423동), window.PROFILE(동×시간 지표).
+   시각 계약: 시퀀셜 blue 단일 램프(밝→어두움), 6단계 분위수 분류.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 색 램프: 지정된 13단계 blue 에서 6색 선택. 라이트/다크 별도(다크는 한 칸 어둡게). ── */
+var RAMP_LIGHT = ["#cde2fb","#9ec5f4","#6da7ec","#3987e5","#256abf","#104281"];
+var RAMP_DARK  = ["#b7d3f6","#86b6ef","#5598e7","#2a78d6","#1c5cab","#0d366b"];
+var NCLASS = 6;
+
+/* ── 지표 설정 ─────────────────────────────────────────────────────────────
+   fmt: 툴팁/표용 값 표기. legendFmt: 범례 경계 라벨(간결형). */
+function busLabel(v){ return v < 3.5 ? "여유" : (v < 4.5 ? "보통" : "혼잡"); }
+function fmtSec(v){
+  var m = Math.floor(v/60), s = Math.round(v - m*60);
+  if (s === 60){ m += 1; s = 0; }
+  return m > 0 ? (m + "분 " + s + "초") : (s + "초");
+}
+var METRICS = {
+  parking: {
+    name: "주차 점유율", key: "parking",
+    desc: "공영주차장 실시간 점유율(현재 주차대수 ÷ 총 주차면수)의 동×시간대 평균입니다.",
+    coverage: "표본 — 공영주차장 123개소. 서울 전역이 아닌 이 축(주차장)의 상태입니다.",
+    fmt: function(v){ return Math.round(v*100) + "%"; },
+    legendFmt: function(v){ return Math.round(v*100) + "%"; }
+  },
+  bus: {
+    name: "버스 혼잡도", key: "bus",
+    desc: "간선버스 실시간 혼잡도(3 여유 · 4 보통 · 5 혼잡)의 동×시간대 평균입니다.",
+    coverage: "표본 — 버스 간선 5개 노선. 서울 전역이 아닌 이 축(버스 노선)의 상태입니다.",
+    fmt: function(v){ return v.toFixed(1) + " · " + busLabel(v); },
+    legendFmt: function(v){ return v.toFixed(1); }
+  },
+  subway: {
+    name: "지하철 대기시간", key: "subway",
+    desc: "접근 중인 열차의 평균 잔여 도착시간(초)의 동×시간대 평균입니다.",
+    coverage: "표본 — 지하철 강남·잠실·사당 3역. 서울 전역이 아닌 이 축(지하철역)의 상태입니다.",
+    fmt: function(v){ return fmtSec(v); },
+    legendFmt: function(v){ return fmtSec(v); }
+  }
+};
+
+var PROFILE = window.PROFILE || {dongs:{}, hours:[], range:["",""]};
+var BOUNDARY = window.BOUNDARY || {features:[]};
+
+/* ── 상태 ── */
+var state = { metric: "parking", hour: 18 };
+
+/* ── 분위수 경계: 각 지표의 전체(동×시간) 실측 분포에서 5개 경계(6분류) 산출. ──
+   근거: 시간 슬라이더를 움직여도 색 의미가 유지되게 지표 단위 고정 스케일 사용. */
+function quantileBreaks(metricKey){
+  var vals = [];
+  var dongs = PROFILE.dongs;
+  for (var code in dongs){
+    var arr = dongs[code].m[metricKey];
+    for (var h = 0; h < arr.length; h++){
+      if (arr[h] !== null && arr[h] !== undefined) vals.push(arr[h]);
+    }
+  }
+  vals.sort(function(a,b){ return a-b; });
+  var breaks = [];
+  if (!vals.length) return breaks;
+  for (var i = 1; i < NCLASS; i++){
+    var idx = Math.floor(vals.length * i / NCLASS);
+    if (idx >= vals.length) idx = vals.length - 1;
+    breaks.push(vals[idx]);
+  }
+  return breaks; // 길이 5 (오름차순)
+}
+var BREAKS = {
+  parking: quantileBreaks("parking"),
+  bus: quantileBreaks("bus"),
+  subway: quantileBreaks("subway")
+};
+
+function classIndex(v, metricKey){
+  // 경계보다 큰 경우 다음 계급으로. 동일 경계(치우친 분포)여도 안전.
+  var b = BREAKS[metricKey], i = 0;
+  for (; i < b.length; i++){ if (v <= b[i]) return i; }
+  return b.length; // 최상위 계급
+}
+function isDark(){
+  var t = document.documentElement.getAttribute("data-theme");
+  if (t) return t === "dark";
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme:dark)").matches;
+}
+function ramp(){ return isDark() ? RAMP_DARK : RAMP_LIGHT; }
+function neutralColor(){
+  return getComputedStyle(document.documentElement).getPropertyValue("--neutral").trim() || "#f0efec";
+}
+function colorFor(code, metricKey, hour){
+  var d = PROFILE.dongs[code];
+  if (!d) return null;
+  var v = d.m[metricKey][hour];
+  if (v === null || v === undefined) return null;
+  return ramp()[classIndex(v, metricKey)];
+}
+
+/* ── 등장방형 투영 ─────────────────────────────────────────────────────────
+   x = lon·cos(중앙위도), y = −lat. 경도 성분에 cos(lat) 을 곱해 서울 위도(≈37.5°)
+   에서 가로세로 비율이 왜곡되지 않게 맞춘 뒤, 전체 bbox 로 viewBox 를 잡는다. */
+var PROJ = (function(){
+  var minLon=Infinity, maxLon=-Infinity, minLat=Infinity, maxLat=-Infinity;
+  BOUNDARY.features.forEach(function(f){
+    eachRing(f.geometry, function(ring){
+      ring.forEach(function(pt){
+        if (pt[0]<minLon) minLon=pt[0]; if (pt[0]>maxLon) maxLon=pt[0];
+        if (pt[1]<minLat) minLat=pt[1]; if (pt[1]>maxLat) maxLat=pt[1];
+      });
+    });
+  });
+  var midLat = (minLat+maxLat)/2;
+  var kx = Math.cos(midLat*Math.PI/180);
+  function px(lon){ return lon*kx; }
+  function py(lat){ return -lat; }
+  var x0=px(minLon), x1=px(maxLon), y0=py(maxLat), y1=py(minLat); // y0<y1
+  return {
+    kx:kx,
+    vbX:x0, vbY:y0, vbW:(x1-x0), vbH:(y1-y0),
+    project:function(pt){ return [px(pt[0]), py(pt[1])]; }
+  };
+})();
+
+function eachRing(geom, cb){
+  if (!geom) return;
+  if (geom.type === "Polygon"){ geom.coordinates.forEach(cb); }
+  else if (geom.type === "MultiPolygon"){
+    geom.coordinates.forEach(function(poly){ poly.forEach(cb); });
+  }
+}
+function pathFor(geom){
+  var d = "";
+  eachRing(geom, function(ring){
+    for (var i=0;i<ring.length;i++){
+      var p = PROJ.project(ring[i]);
+      d += (i===0 ? "M" : "L") + p[0].toFixed(5) + " " + p[1].toFixed(5);
+    }
+    d += "Z";
+  });
+  return d;
+}
+
+/* ── 지도 렌더(경로는 1회 생성, 색만 갱신) ── */
+var SVGNS = "http://www.w3.org/2000/svg";
+var pathEls = {}; // code -> <path>
+function buildMap(){
+  var pad = PROJ.vbW * 0.01;
+  var svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("viewBox",
+    (PROJ.vbX-pad)+" "+(PROJ.vbY-pad)+" "+(PROJ.vbW+2*pad)+" "+(PROJ.vbH+2*pad));
+  svg.setAttribute("preserveAspectRatio","xMidYMid meet");
+  svg.setAttribute("role","img");
+  svg.setAttribute("aria-label","서울 행정동 교통 지표 지도");
+  BOUNDARY.features.forEach(function(f){
+    var code = f.properties.code;
+    var el = document.createElementNS(SVGNS, "path");
+    el.setAttribute("d", pathFor(f.geometry));
+    el.setAttribute("class", "dong");
+    el.setAttribute("data-code", code);
+    el.addEventListener("mousemove", onDongHover);
+    el.addEventListener("mouseleave", hideTip);
+    el.addEventListener("click", function(){ selectDong(code); });
+    pathEls[code] = el;
+    svg.appendChild(el);
+  });
+  document.getElementById("mapholder").appendChild(svg);
+}
+function recolorMap(){
+  var na = neutralColor();
+  BOUNDARY.features.forEach(function(f){
+    var code = f.properties.code;
+    var c = colorFor(code, state.metric, state.hour);
+    pathEls[code].setAttribute("fill", c || na);
+  });
+}
+
+/* ── 이름/구 조회(profile 우선, 없으면 boundary props) ── */
+function dongInfo(code){
+  var d = PROFILE.dongs[code];
+  if (d) return {name:d.name, gu:d.gu};
+  var f = BOUNDARY.features.find(function(x){ return x.properties.code===code; });
+  return f ? {name:f.properties.name, gu:f.properties.gu} : {name:code, gu:""};
+}
+
+/* ── 툴팁 ── */
+var tip = document.getElementById("tip");
+function onDongHover(ev){
+  var code = ev.currentTarget.getAttribute("data-code");
+  var info = dongInfo(code);
+  var d = PROFILE.dongs[code];
+  var m = METRICS[state.metric];
+  var valStr = "데이터 없음", obsStr = "";
+  if (d){
+    var v = d.m[state.metric][state.hour];
+    var obs = d.obs[state.metric][state.hour];
+    valStr = (v===null||v===undefined) ? "이 시간 관측 없음" : m.fmt(v);
+    obsStr = (obs>0) ? ("관측 " + obs + "일") : "";
+  }
+  tip.innerHTML =
+    '<div class="t-name">'+esc(info.name)+'</div>'+
+    '<div class="t-gu">'+esc(info.gu)+'</div>'+
+    '<div class="t-val">'+esc(m.name)+': '+esc(valStr)+'</div>'+
+    (obsStr ? '<div class="t-obs">'+obsStr+'</div>' : '');
+  tip.style.opacity = "1";
+  positionTip(ev);
+}
+function positionTip(ev){
+  var x = ev.clientX + 14, y = ev.clientY + 14;
+  var w = tip.offsetWidth, h = tip.offsetHeight;
+  if (x + w > window.innerWidth - 8) x = ev.clientX - w - 14;
+  if (y + h > window.innerHeight - 8) y = ev.clientY - h - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+function hideTip(){ tip.style.opacity = "0"; }
+function esc(s){
+  return String(s).replace(/[&<>"']/g, function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+  });
+}
+
+/* ── 상세 패널: 활성 지표 24h 곡선 + 세 지표 미니 요약 ── */
+var selCode = null;
+function selectDong(code){
+  selCode = code;
+  for (var c in pathEls) pathEls[c].classList.remove("sel");
+  if (pathEls[code]) pathEls[code].classList.add("sel");
+  renderDetail();
+}
+function metricRange(metricKey){
+  var vals = [];
+  var dongs = PROFILE.dongs;
+  for (var code in dongs){
+    dongs[code].m[metricKey].forEach(function(v){ if (v!==null&&v!==undefined) vals.push(v); });
+  }
+  if (!vals.length) return [0,1];
+  return [Math.min.apply(null,vals), Math.max.apply(null,vals)];
+}
+function renderDetail(){
+  var ph = document.getElementById("detailph");
+  var body = document.getElementById("detailbody");
+  if (!selCode || !PROFILE.dongs[selCode]){
+    ph.classList.remove("hidden"); body.classList.add("hidden"); return;
+  }
+  ph.classList.add("hidden"); body.classList.remove("hidden");
+  var d = PROFILE.dongs[selCode];
+  var m = METRICS[state.metric];
+  // 미니 요약: 세 지표의 현재시각 값 + 일평균
+  var mini = "";
+  ["parking","bus","subway"].forEach(function(k){
+    var mm = METRICS[k];
+    var now = d.m[k][state.hour];
+    var arr = d.m[k].filter(function(v){ return v!==null&&v!==undefined; });
+    var avg = arr.length ? arr.reduce(function(a,b){return a+b;},0)/arr.length : null;
+    mini +=
+      '<div class="m"><div class="lab">'+esc(mm.name)+'</div>'+
+      '<div class="now">'+(now===null||now===undefined?"—":esc(mm.fmt(now)))+'</div>'+
+      '<div class="avg">일평균 '+(avg===null?"—":esc(mm.fmt(avg)))+'</div></div>';
+  });
+  body.innerHTML =
+    '<p class="dname">'+esc(d.name)+'</p>'+
+    '<p class="dgu">'+esc(d.gu)+'</p>'+
+    '<div class="mini">'+mini+'</div>'+
+    '<div class="chartcap">'+esc(m.name)+' 24시간 추이</div>'+
+    '<div id="detailchart"></div>';
+  drawCurve(d.m[state.metric], m);
+}
+function drawCurve(series, m){
+  var W = 300, H = 150, ml = 8, mr = 8, mt = 10, mb = 22;
+  var iw = W-ml-mr, ih = H-mt-mb;
+  var rng = metricRange(state.metric);
+  var lo = rng[0], hi = rng[1]; if (hi===lo) hi = lo+1;
+  var axis = getComputedStyle(document.documentElement).getPropertyValue("--axis").trim();
+  var grid = getComputedStyle(document.documentElement).getPropertyValue("--grid").trim();
+  var strong = getComputedStyle(document.documentElement).getPropertyValue("--line-strong").trim();
+  function X(h){ return ml + iw * (h/23); }
+  function Y(v){ return mt + ih * (1 - (v-lo)/(hi-lo)); }
+  var svg = '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="xMidYMid meet" role="img" aria-label="'+esc(m.name)+' 24시간 곡선">';
+  // recessive gridlines (0/6/12/18/23시)
+  [0,6,12,18,23].forEach(function(h){
+    svg += '<line x1="'+X(h)+'" y1="'+mt+'" x2="'+X(h)+'" y2="'+(mt+ih)+'" stroke="'+grid+'" stroke-width="1"/>';
+    svg += '<text x="'+X(h)+'" y="'+(H-6)+'" fill="'+axis+'" font-size="10" text-anchor="middle">'+h+'</text>';
+  });
+  // line (null 은 끊어서 이음)
+  var dstr = "", started = false;
+  for (var h=0; h<24; h++){
+    var v = series[h];
+    if (v===null||v===undefined){ started=false; continue; }
+    dstr += (started ? "L" : "M") + X(h).toFixed(1) + " " + Y(v).toFixed(1);
+    started = true;
+  }
+  svg += '<path d="'+dstr+'" fill="none" stroke="'+strong+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+  // 점(관측 지점)
+  for (var h2=0; h2<24; h2++){
+    var v2 = series[h2];
+    if (v2===null||v2===undefined) continue;
+    svg += '<circle cx="'+X(h2)+'" cy="'+Y(v2)+'" r="2.4" fill="'+strong+'"/>';
+  }
+  // 현재 시간 크로스헤어 표시
+  svg += '<line id="cx-cur" x1="'+X(state.hour)+'" y1="'+mt+'" x2="'+X(state.hour)+'" y2="'+(mt+ih)+'" stroke="'+strong+'" stroke-width="1" stroke-dasharray="3 3" opacity=".55"/>';
+  // hover 크로스헤어 (동적)
+  svg += '<line id="cx-hover" x1="0" y1="'+mt+'" x2="0" y2="'+(mt+ih)+'" stroke="'+axis+'" stroke-width="1" opacity="0"/>';
+  svg += '<rect id="cx-hit" x="'+ml+'" y="'+mt+'" width="'+iw+'" height="'+ih+'" fill="transparent"/>';
+  svg += '</svg>';
+  var holder = document.getElementById("detailchart");
+  holder.innerHTML = svg;
+  // 곡선 hover 크로스헤어 + 툴팁
+  var svgEl = holder.querySelector("svg");
+  var hitEl = holder.querySelector("#cx-hit");
+  var hoverEl = holder.querySelector("#cx-hover");
+  hitEl.addEventListener("mousemove", function(ev){
+    var r = svgEl.getBoundingClientRect();
+    var px = (ev.clientX - r.left) / r.width * W;
+    var h = Math.round((px - ml) / iw * 23);
+    if (h<0) h=0; if (h>23) h=23;
+    hoverEl.setAttribute("x1", X(h)); hoverEl.setAttribute("x2", X(h));
+    hoverEl.setAttribute("opacity", "0.7");
+    var v = series[h];
+    tip.innerHTML = '<div class="t-name">'+h+':00</div><div class="t-val">'+
+      esc(m.name)+': '+(v===null||v===undefined?"관측 없음":esc(m.fmt(v)))+'</div>';
+    tip.style.opacity = "1"; positionTip(ev);
+  });
+  hitEl.addEventListener("mouseleave", function(){ hoverEl.setAttribute("opacity","0"); hideTip(); });
+}
+
+/* ── 범례 ── */
+function renderLegend(){
+  var bar = document.getElementById("legendbar");
+  var labs = document.getElementById("legendlabels");
+  var r = ramp(), b = BREAKS[state.metric], m = METRICS[state.metric];
+  bar.innerHTML = ""; labs.innerHTML = "";
+  for (var i=0;i<r.length;i++){
+    var s = document.createElement("span"); s.style.background = r[i]; bar.appendChild(s);
+  }
+  // 경계 라벨: 낮음 → 높음, 5개 경계
+  var lowSpan = document.createElement("span"); lowSpan.textContent = "낮음"; labs.appendChild(lowSpan);
+  b.forEach(function(bv){
+    var sp = document.createElement("span"); sp.textContent = m.legendFmt(bv); labs.appendChild(sp);
+  });
+  var hiSpan = document.createElement("span"); hiSpan.textContent = "높음"; labs.appendChild(hiSpan);
+}
+
+/* ── 표 보기 ── */
+var tableSort = {col:"value", dir:-1};
+function renderTable(){
+  var thead = document.querySelector("#datatable thead");
+  var tbody = document.querySelector("#datatable tbody");
+  var m = METRICS[state.metric];
+  var rows = [];
+  for (var code in PROFILE.dongs){
+    var d = PROFILE.dongs[code];
+    var v = d.m[state.metric][state.hour];
+    var obs = d.obs[state.metric][state.hour];
+    rows.push({name:d.name, gu:d.gu, value:v, obs:obs});
+  }
+  var col = tableSort.col, dir = tableSort.dir;
+  rows.sort(function(a,b){
+    var av=a[col], bv=b[col];
+    if (col==="value"){ // null 은 항상 맨 아래
+      if (av===null||av===undefined) return 1;
+      if (bv===null||bv===undefined) return -1;
+    }
+    if (typeof av==="string") return av.localeCompare(bv,"ko")*dir;
+    return (av-bv)*dir;
+  });
+  thead.innerHTML =
+    '<tr><th data-col="name">동</th><th data-col="gu">구</th>'+
+    '<th class="num" data-col="value">'+esc(m.name)+' ('+state.hour+':00)</th>'+
+    '<th class="num" data-col="obs">관측일수</th></tr>';
+  thead.querySelectorAll("th").forEach(function(th){
+    th.addEventListener("click", function(){
+      var c = th.getAttribute("data-col");
+      if (tableSort.col===c) tableSort.dir *= -1;
+      else { tableSort.col=c; tableSort.dir = (c==="name"||c==="gu")?1:-1; }
+      renderTable();
+    });
+  });
+  var html = "";
+  rows.forEach(function(row){
+    html += "<tr><td>"+esc(row.name)+"</td><td>"+esc(row.gu)+"</td>"+
+      '<td class="num">'+(row.value===null||row.value===undefined?"—":esc(m.fmt(row.value)))+"</td>"+
+      '<td class="num">'+(row.obs>0?row.obs:"—")+"</td></tr>";
+  });
+  tbody.innerHTML = html;
+}
+
+/* ── 전체 갱신 ── */
+function update(){
+  var m = METRICS[state.metric];
+  document.getElementById("metricdesc").textContent = m.desc;
+  document.getElementById("coverage").innerHTML = "<b>커버리지 안내</b> — " + esc(m.coverage);
+  document.getElementById("maptitle").textContent =
+    m.name + " · " + pad2(state.hour) + ":00 (동별 색이 진할수록 값이 큼)";
+  recolorMap();
+  renderLegend();
+  renderDetail();
+  if (!document.getElementById("tablewrap").classList.contains("hidden")) renderTable();
+}
+function pad2(n){ return (n<10?"0":"")+n; }
+
+/* ── 초기화 & 이벤트 ── */
+function init(){
+  document.getElementById("asof").textContent =
+    "데이터 기준: " + (PROFILE.range ? PROFILE.range[0] + " ~ " + PROFILE.range[1] : "") +
+    " (" + (PROFILE.days||0) + "일 평균) · 총 " + Object.keys(PROFILE.dongs).length + "개 동 표본";
+  buildMap();
+  update();
+
+  // 탭
+  document.getElementById("tabs").addEventListener("click", function(ev){
+    var t = ev.target.closest(".tab"); if (!t) return;
+    state.metric = t.getAttribute("data-metric");
+    document.querySelectorAll(".tab").forEach(function(x){
+      x.setAttribute("aria-selected", x===t ? "true" : "false");
+    });
+    update();
+  });
+  // 슬라이더
+  var hourEl = document.getElementById("hour");
+  hourEl.addEventListener("input", function(){
+    state.hour = parseInt(hourEl.value, 10);
+    document.getElementById("hourval").textContent = pad2(state.hour) + ":00";
+    update();
+  });
+  document.getElementById("hourval").textContent = pad2(state.hour) + ":00";
+  // 표 토글
+  var tbtn = document.getElementById("tabletoggle");
+  tbtn.addEventListener("click", function(){
+    var tw = document.getElementById("tablewrap");
+    var open = tw.classList.toggle("hidden") === false;
+    tbtn.setAttribute("aria-expanded", open ? "true" : "false");
+    tbtn.textContent = open ? "표 접기 ▴" : "표로 보기 ▾";
+    if (open) renderTable();
+  });
+  // 테마 토글
+  document.getElementById("themebtn").addEventListener("click", function(){
+    var cur = document.documentElement.getAttribute("data-theme");
+    var next = cur ? (cur==="dark"?"light":"dark") : (isDark()?"light":"dark");
+    document.documentElement.setAttribute("data-theme", next);
+    update();
+  });
+  // OS 테마 변경 반영(수동 토글 없을 때)
+  if (window.matchMedia){
+    window.matchMedia("(prefers-color-scheme:dark)").addEventListener("change", function(){
+      if (!document.documentElement.getAttribute("data-theme")) update();
+    });
+  }
+}
+
+if (BOUNDARY.features && BOUNDARY.features.length){
+  init();
+} else {
+  document.getElementById("mapholder").innerHTML =
+    '<p style="color:var(--axis)">데이터를 불러오지 못했습니다. data/boundary.js · data/profile.js 를 확인하세요.</p>';
+}
+</script>
