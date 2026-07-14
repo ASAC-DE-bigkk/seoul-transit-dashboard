@@ -64,6 +64,79 @@ def r3(v):
     return None if v is None else round(float(v), 3)
 
 
+# 서울 실시간 도착 API subwayId -> 노선 배지명. 미매핑은 train_line_nm 로 폴백.
+LINE_NM = {
+    "1001": "1호선", "1002": "2호선", "1003": "3호선", "1004": "4호선",
+    "1005": "5호선", "1006": "6호선", "1007": "7호선", "1008": "8호선",
+    "1009": "9호선", "1063": "경의중앙선", "1065": "공항철도", "1067": "경춘선",
+    "1075": "수인분당선", "1077": "신분당선", "1092": "우이신설선", "1093": "서해선",
+}
+# 수집 대상 역 표시 순서(커버리지 문구와 동일).
+STATION_ORDER = ["강남", "잠실", "사당"]
+
+
+def fmt_kst(dt):
+    """event_at(naive KST 벽시계) -> 'YYYY-MM-DD HH:MM'."""
+    return dt.strftime("%Y-%m-%d %H:%M") if hasattr(dt, "strftime") else str(dt)[:16]
+
+
+def build_arrivals(cur):
+    """지하철 실시간 도착정보의 '열차 잔여 도착시간' 대표 스냅샷.
+
+    ARRIVALS_SNAPSHOT_KST(기본 2026-07-13 18:25, 월요일 저녁 러시) 이전의 가장
+    최근 수집 run(dag_run_id) 한 벌을 골라 역×노선×방향별 도착 리스트로 편성한다.
+    barvl_dt_sec(잔여초)·arvl_msg2(도착 메시지)를 그대로 실어 활용사례 심사에서
+    실시간 도착정보 API 사용이 화면으로 확인되게 한다.
+    """
+    target = os.environ.get("ARRIVALS_SNAPSHOT_KST", "2026-07-13 18:25:00")
+    data = rows(cur, """
+        with pick as (
+            select dag_run_id
+            from slv_transit_subway_arrival
+            where event_at <= timestamp '%s'
+              and event_at >= timestamp '%s' - interval '90' minute
+            order by event_at desc
+            limit 1
+        )
+        select a.statn_nm, a.subway_id, a.train_line_nm, a.updn_line,
+               a.barvl_dt_sec, a.arvl_msg2, a.terminal_statn_nm, a.is_last_train,
+               a.event_at
+        from slv_transit_subway_arrival a
+        join pick p on a.dag_run_id = p.dag_run_id
+        order by a.statn_nm, a.subway_id, a.updn_line, a.barvl_dt_sec
+    """ % (target, target))
+
+    stations, snap_max = {}, None
+    for (statn, sid, service, updn, eta, msg, dest, last, ev) in data:
+        s = stations.get(statn)
+        if s is None:
+            s = stations[statn] = {"name": statn, "received": None, "arrivals": []}
+        s["arrivals"].append({
+            "line": LINE_NM.get(sid, ""),
+            "service": service or "",
+            "updn": updn or "",
+            "eta_s": None if eta is None else int(eta),
+            "msg": msg or "",
+            "dest": dest or "",
+            "last": bool(last),
+        })
+        evs = fmt_kst(ev)
+        if s["received"] is None or evs > s["received"]:
+            s["received"] = evs
+        if snap_max is None or evs > snap_max:
+            snap_max = evs
+
+    def order(name):
+        return (STATION_ORDER.index(name) if name in STATION_ORDER else 99, name)
+
+    return {
+        "source": "서울 열린데이터광장 · 지하철 실시간 도착정보(realtimeStationArrival)",
+        # 대표 스냅샷 수집시각(KST 벽시계). 정직 표기 — 실시간 라이브가 아닌 스냅샷.
+        "snapshot_kst": snap_max or target[:16],
+        "stations": [stations[k] for k in sorted(stations, key=order)],
+    }
+
+
 def build_profile(cur):
     # Day-average per (dong, hour-of-day). avg()/count() ignore NULLs, so a
     # dong x hour with no observation for a metric stays null (kept as-is), and
@@ -182,20 +255,35 @@ def main():
     conn = connect()
     cur = conn.cursor()
 
+    # 도착 전광판 스냅샷만 재생성(집계 profile/boundary 는 손대지 않음).
+    if os.environ.get("ARRIVALS_ONLY") == "1":
+        arrivals = build_arrivals(cur)
+        a_path = os.path.join(out_dir, "arrivals.js")
+        a_size = write_js(a_path, "ARRIVALS", arrivals)
+        n_trains = sum(len(s["arrivals"]) for s in arrivals["stations"])
+        print("arrivals.js: %d stations, %d trains, snapshot %s, %.1f KB" % (
+            len(arrivals["stations"]), n_trains, arrivals["snapshot_kst"], a_size / 1024))
+        return
+
     profile = build_profile(cur)
     boundary = build_boundary(cur)
+    arrivals = build_arrivals(cur)
 
     p_path = os.path.join(out_dir, "profile.js")
     b_path = os.path.join(out_dir, "boundary.js")
+    a_path = os.path.join(out_dir, "arrivals.js")
     p_size = write_js(p_path, "PROFILE", profile)
     b_size = write_js(b_path, "BOUNDARY", boundary)
+    a_size = write_js(a_path, "ARRIVALS", arrivals)
 
     print("profile.js : %d dongs, range %s, %d days, %.1f KB" % (
         len(profile["dongs"]), " ~ ".join(profile["range"]),
         profile["days"], p_size / 1024))
     print("boundary.js: %d features, %.1f KB" % (
         len(boundary["features"]), b_size / 1024))
-    print("total      : %.1f KB" % ((p_size + b_size) / 1024))
+    print("arrivals.js: %d stations, snapshot %s, %.1f KB" % (
+        len(arrivals["stations"]), arrivals["snapshot_kst"], a_size / 1024))
+    print("total      : %.1f KB" % ((p_size + b_size + a_size) / 1024))
 
 
 if __name__ == "__main__":
